@@ -1,0 +1,26 @@
+# Secrets — never commit these
+.env
+*.env
+
+# Runtime data (generated at runtime — don't commit)
+spotify_outreach/data/seen_releases.json
+spotify_outreach/data/contacted_log.json
+spotify_outreach/data/audit_log.jsonl
+spotify_outreach/data/agent.log
+spotify_outreach/data/cron.log
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+build/
+
+# IDE
+.vscode/
+.idea/
+*.swp
