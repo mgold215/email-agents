@@ -10,24 +10,25 @@ Key safety features:
   2. Rate limiting — waits between emails to avoid being flagged as spam.
      Default: 30 seconds between each email.
 
-  3. Audit log — every action (sent, skipped, error) is written to a log file.
+  3. Audit log — every action (sent, skipped, error) is written to Supabase
+     in the 'outreach_log' table for a permanent, queryable audit trail.
 
-  4. Deduplication — tracks who has been contacted per release so you never
-     double-email the same person about the same release.
+  4. Deduplication — checks Supabase to see if this contact was already emailed
+     about this release, so you never double-send.
 
 Email is sent via Gmail SMTP using an App Password.
 (You must enable 2FA on your Google account and create an App Password.)
 """
 
-import json
 import logging
 import os
 import smtplib
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-from pathlib import Path
+
+from supabase_client import get_supabase
 
 logger = logging.getLogger(__name__)
 
@@ -52,61 +53,53 @@ LIVE_MODE = os.environ.get("OUTREACH_LIVE_MODE", "false").lower() == "true"
 # Seconds to wait between each email to avoid spam filters
 RATE_LIMIT_SECONDS = int(os.environ.get("EMAIL_RATE_LIMIT_SECONDS", "30"))
 
-# File that tracks who has already been contacted per release
-CONTACTED_LOG_FILE = Path(__file__).parent / "data" / "contacted_log.json"
-
-# Audit log file for all send actions
-AUDIT_LOG_FILE = Path(__file__).parent / "data" / "audit_log.jsonl"
-
 
 # ---------------------------------------------------------------------------
-# Deduplication helpers
-# ---------------------------------------------------------------------------
-
-def _load_contacted_log() -> dict:
-    """
-    Load the dict of {release_id: [list of contact emails already sent]}.
-    Returns empty dict if the file doesn't exist.
-    """
-    if CONTACTED_LOG_FILE.exists():
-        return json.loads(CONTACTED_LOG_FILE.read_text())
-    return {}
-
-
-def _save_contacted_log(log: dict) -> None:
-    """Save the contacted log back to disk."""
-    CONTACTED_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
-    CONTACTED_LOG_FILE.write_text(json.dumps(log, indent=2))
-
-
-def already_contacted(release_id: str, contact_email: str) -> bool:
-    """Return True if we've already emailed this contact about this release."""
-    log = _load_contacted_log()
-    return contact_email in log.get(release_id, [])
-
-
-def mark_as_contacted(release_id: str, contact_email: str) -> None:
-    """Record that we've emailed this contact about this release."""
-    log = _load_contacted_log()
-    if release_id not in log:
-        log[release_id] = []
-    if contact_email not in log[release_id]:
-        log[release_id].append(contact_email)
-    _save_contacted_log(log)
-
-
-# ---------------------------------------------------------------------------
-# Audit logging
+# Supabase audit log helpers
 # ---------------------------------------------------------------------------
 
 def _write_audit_entry(entry: dict) -> None:
     """
-    Append one line to the audit log file.
-    Each line is a JSON object — this is the "append-only" log for compliance.
+    Insert one row into the Supabase 'outreach_log' table.
+    This is the permanent, append-only audit trail for every email action.
+
+    entry keys: action, contact_name, contact_email, release_name,
+                release_id, subject (optional), error_message (optional)
     """
-    AUDIT_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
-    with open(AUDIT_LOG_FILE, "a") as f:
-        f.write(json.dumps(entry) + "\n")
+    supabase = get_supabase()
+    row = {
+        "timestamp":     datetime.now(timezone.utc).isoformat(),
+        "action":        entry.get("action"),
+        "contact_name":  entry.get("contact"),
+        "contact_email": entry.get("email"),
+        "release_name":  entry.get("release"),
+        "release_id":    entry.get("release_id"),
+        "subject":       entry.get("subject"),
+        "error_message": entry.get("error"),
+    }
+    supabase.table("outreach_log").insert(row).execute()
+
+
+# ---------------------------------------------------------------------------
+# Deduplication helpers — check/mark using Supabase outreach_log
+# ---------------------------------------------------------------------------
+
+def already_contacted(release_id: str, contact_email: str) -> bool:
+    """
+    Return True if we've already sent (or logged a 'sent') email to this
+    contact about this release. Checks the Supabase outreach_log table.
+    """
+    supabase = get_supabase()
+    response = (
+        supabase.table("outreach_log")
+        .select("id")
+        .eq("release_id", release_id)
+        .eq("contact_email", contact_email)
+        .eq("action", "sent")
+        .limit(1)
+        .execute()
+    )
+    return len(response.data) > 0
 
 
 # ---------------------------------------------------------------------------
@@ -140,7 +133,7 @@ def send_pitch(
     """
     Send (or simulate sending) a single pitch email.
 
-    Returns True if the email was sent (or would have been in dry-run mode),
+    Returns True if the email was sent (or simulated in dry-run mode),
     False if it was skipped (already contacted) or errored.
     """
     contact_email = contact.get("email")
@@ -152,15 +145,14 @@ def send_pitch(
         logger.warning("Skipping %s — no email address", contact_name)
         return False
 
-    # --- Skip if already contacted about this release ---
+    # --- Skip if already contacted about this release (dedup check in Supabase) ---
     if already_contacted(release_id, contact_email):
         logger.info("Skipping %s — already contacted about '%s'", contact_name, release["name"])
         _write_audit_entry({
-            "timestamp": datetime.utcnow().isoformat(),
-            "action": "skipped_duplicate",
-            "contact": contact_name,
-            "email": contact_email,
-            "release": release["name"],
+            "action":     "skipped_duplicate",
+            "contact":    contact_name,
+            "email":      contact_email,
+            "release":    release["name"],
             "release_id": release_id,
         })
         return False
@@ -175,17 +167,14 @@ def send_pitch(
         print("=" * 70)
 
         _write_audit_entry({
-            "timestamp": datetime.utcnow().isoformat(),
-            "action": "dry_run",
-            "contact": contact_name,
-            "email": contact_email,
-            "release": release["name"],
+            "action":     "dry_run",
+            "contact":    contact_name,
+            "email":      contact_email,
+            "release":    release["name"],
             "release_id": release_id,
-            "subject": subject,
+            "subject":    subject,
         })
-        # Mark as contacted even in dry-run, so we don't re-send in the next real run
-        # (Comment this out if you want to re-send to everyone when you go live)
-        # mark_as_contacted(release_id, contact_email)
+        # NOTE: We do NOT mark as 'sent' in dry run, so live mode will still send later.
         return True
 
     # --- Live mode: actually send the email ---
@@ -198,16 +187,14 @@ def send_pitch(
             server.login(SENDER_EMAIL, SENDER_APP_PASSWORD)
             server.send_message(msg)
 
-        # Record in dedup log and audit log
-        mark_as_contacted(release_id, contact_email)
+        # Log as 'sent' in Supabase — this also acts as the dedup marker
         _write_audit_entry({
-            "timestamp": datetime.utcnow().isoformat(),
-            "action": "sent",
-            "contact": contact_name,
-            "email": contact_email,
-            "release": release["name"],
+            "action":     "sent",
+            "contact":    contact_name,
+            "email":      contact_email,
+            "release":    release["name"],
             "release_id": release_id,
-            "subject": subject,
+            "subject":    subject,
         })
         logger.info("Email sent to %s <%s>", contact_name, contact_email)
         return True
@@ -217,11 +204,10 @@ def send_pitch(
             "Gmail authentication failed. Check SENDER_EMAIL and SENDER_APP_PASSWORD."
         )
         _write_audit_entry({
-            "timestamp": datetime.utcnow().isoformat(),
-            "action": "error_auth",
-            "contact": contact_name,
-            "email": contact_email,
-            "release": release["name"],
+            "action":     "error_auth",
+            "contact":    contact_name,
+            "email":      contact_email,
+            "release":    release["name"],
             "release_id": release_id,
         })
         return False
@@ -229,13 +215,12 @@ def send_pitch(
     except Exception as e:
         logger.error("Failed to send email to %s: %s", contact_name, e)
         _write_audit_entry({
-            "timestamp": datetime.utcnow().isoformat(),
-            "action": "error_send",
-            "contact": contact_name,
-            "email": contact_email,
-            "release": release["name"],
+            "action":     "error_send",
+            "contact":    contact_name,
+            "email":      contact_email,
+            "release":    release["name"],
             "release_id": release_id,
-            "error": str(e),
+            "error":      str(e),
         })
         return False
 
@@ -283,13 +268,12 @@ def send_all_pitches(pitched_contacts: list[dict], release: dict) -> dict:
         else:
             summary["errors"] += 1
 
-        # Wait between emails to be a good citizen (avoid spam flags)
+        # Wait between emails to avoid spam flags
         # Skip the wait after the last email
         if i < total and LIVE_MODE:
             logger.debug("Waiting %d seconds before next email...", RATE_LIMIT_SECONDS)
             time.sleep(RATE_LIMIT_SECONDS)
         elif i < total and not LIVE_MODE:
-            # In dry run, still show a shorter pause
             time.sleep(0.5)
 
     logger.info(

@@ -6,19 +6,18 @@ Uses the Spotipy library to talk to the Spotify Web API.
 
 How it works:
   1. Fetches ALL albums/singles/eps from the artist's discography
-  2. Compares against a local JSON "seen releases" cache
+  2. Compares against the Supabase 'seen_releases' table (not a local file)
   3. Returns any brand-new releases it hasn't seen before
-  4. Saves newly seen releases so they won't be flagged again next Friday
+  4. Saves newly seen releases to Supabase so they won't be flagged again next Friday
 """
 
-import json
 import os
 import logging
-from datetime import datetime, date
-from pathlib import Path
 
 import spotipy
 from spotipy.oauth2 import SpotifyClientCredentials
+
+from supabase_client import get_supabase
 
 # --------------------------------------------------------------------------
 # Config
@@ -27,9 +26,6 @@ from spotipy.oauth2 import SpotifyClientCredentials
 # Your Spotify artist ID (extracted from the URL you provided)
 ARTIST_ID = "3u85DFNq3xQgj3TMQL0ACi"
 ARTIST_NAME = "moodmixformat"
-
-# Local file that stores release IDs we've already seen, so we don't re-pitch
-SEEN_RELEASES_FILE = Path(__file__).parent / "data" / "seen_releases.json"
 
 logger = logging.getLogger(__name__)
 
@@ -49,23 +45,42 @@ def _get_spotify_client() -> spotipy.Spotify:
 def _load_seen_releases() -> set:
     """
     Load the set of Spotify release IDs we have already processed.
-    Returns an empty set if the file doesn't exist yet.
+    Reads from the Supabase 'seen_releases' table.
+    Returns an empty set if nothing has been saved yet.
     """
-    if SEEN_RELEASES_FILE.exists():
-        data = json.loads(SEEN_RELEASES_FILE.read_text())
-        return set(data.get("seen_ids", []))
-    return set()
+    supabase = get_supabase()
+    # Fetch just the release_id column from every row in the table
+    response = supabase.table("seen_releases").select("release_id").execute()
+    return {row["release_id"] for row in response.data}
 
 
-def _save_seen_releases(seen_ids: set) -> None:
+def _save_seen_releases(new_releases: list[dict]) -> None:
     """
-    Save the updated set of seen release IDs back to disk so we don't
-    re-process them on the next run.
+    Save newly seen releases to the Supabase 'seen_releases' table.
+    Uses upsert so re-running the agent never creates duplicate rows.
+
+    Each row stores: release_id, release_name, release_type, release_date, spotify_url
     """
-    SEEN_RELEASES_FILE.parent.mkdir(parents=True, exist_ok=True)
-    SEEN_RELEASES_FILE.write_text(
-        json.dumps({"seen_ids": list(seen_ids), "last_updated": str(date.today())}, indent=2)
-    )
+    if not new_releases:
+        return
+
+    supabase = get_supabase()
+
+    # Build the rows to insert — one per new release
+    rows = [
+        {
+            "release_id":   release["id"],
+            "release_name": release["name"],
+            "release_type": release["type"],
+            "release_date": release["release_date"],
+            "spotify_url":  release["spotify_url"],
+        }
+        for release in new_releases
+    ]
+
+    # upsert: insert new rows, and if release_id already exists just update it
+    supabase.table("seen_releases").upsert(rows).execute()
+    logger.info("Saved %d new release(s) to Supabase seen_releases table", len(rows))
 
 
 def _fetch_all_releases(sp: spotipy.Spotify) -> list[dict]:
@@ -73,13 +88,11 @@ def _fetch_all_releases(sp: spotipy.Spotify) -> list[dict]:
     Fetch every release from the artist's discography, including:
       - 'album'  (full-length LPs)
       - 'single' (singles and EPs live here in the Spotify API)
-      - 'compilation' (just in case)
 
     Spotify's API paginates results, so we loop through all pages.
     """
     all_releases = []
 
-    # album_type can be a comma-separated string: 'album,single,compilation'
     results = sp.artist_albums(
         ARTIST_ID,
         album_type="album,single",  # singles covers both singles AND EPs
@@ -119,13 +132,13 @@ def check_for_new_releases() -> list[dict]:
 
     sp = _get_spotify_client()
     seen_ids = _load_seen_releases()
+    logger.info("Loaded %d already-seen release IDs from Supabase", len(seen_ids))
 
-    # Fetch full discography
+    # Fetch full discography from Spotify
     all_releases = _fetch_all_releases(sp)
     logger.info("Found %d total releases in discography", len(all_releases))
 
     new_releases = []
-    updated_seen_ids = set(seen_ids)  # copy so we can add to it
 
     for release in all_releases:
         release_id = release["id"]
@@ -136,21 +149,20 @@ def check_for_new_releases() -> list[dict]:
 
         # This is a new release we haven't seen yet!
         new_release = {
-            "id": release_id,
-            "name": release["name"],
-            "type": release["album_type"],  # 'album', 'single', or 'compilation'
+            "id":           release_id,
+            "name":         release["name"],
+            "type":         release["album_type"],  # 'album', 'single', or 'compilation'
             "release_date": release.get("release_date", "unknown"),
-            "spotify_url": release["external_urls"]["spotify"],
-            "spotify_uri": release["uri"],
+            "spotify_url":  release["external_urls"]["spotify"],
+            "spotify_uri":  release["uri"],
             "total_tracks": release.get("total_tracks", 1),
-            "images": release.get("images", []),
+            "images":       release.get("images", []),
         }
         new_releases.append(new_release)
-        updated_seen_ids.add(release_id)
         logger.info("New release found: %s (%s)", new_release["name"], new_release["type"])
 
-    # Save the updated seen list so we don't flag these again next week
-    _save_seen_releases(updated_seen_ids)
+    # Save the new releases to Supabase so we don't flag them again next week
+    _save_seen_releases(new_releases)
 
     if not new_releases:
         logger.info("No new releases found for %s this week.", ARTIST_NAME)
