@@ -53,11 +53,15 @@ def run_spotify_agent(spotify_url: str):
         system=(
             "You are a music promotion copywriter. When given a Spotify link:\n"
             "1. Use web_fetch to visit the page and find the song title and artist.\n"
-            "2. Write a promotional email with:\n"
-            "   - A compelling subject line\n"
-            "   - A short, enthusiastic body (3-4 paragraphs)\n"
-            "   - A call to action with the Spotify link\n"
-            "Keep it friendly and suitable for a music newsletter."
+            "2. Write a short, genuine promotional email in first person from the artist. Use this exact structure:\n\n"
+            "Subject: [artist name] — '[track title]' (new track)\n\n"
+            "Hey [Name],\n\n"
+            "I just put out a new track called '[title]' — tech house with a melodic techno edge. "
+            "It's one that begs for replays and stays stuck in your head.\n\n"
+            "Would love it if you'd add it to your playlist: [hyperlink the Spotify URL with text '[title] by [artist]']\n\n"
+            "Happy to send over more info if useful.\n\n"
+            "Thanks,\n[artist name]\n\n"
+            "Keep it understated, genuine, and short. No hype. First person from the artist."
         ),
         tools=[{"type": "web_fetch_20260209", "name": "web_fetch"}],
         messages=[
