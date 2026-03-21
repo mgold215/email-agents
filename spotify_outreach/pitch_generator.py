@@ -20,13 +20,21 @@ Claude uses adaptive thinking to craft each message thoughtfully.
 """
 
 import logging
+import os
 import anthropic
 
 logger = logging.getLogger(__name__)
 
-# Initialise the Anthropic client.
-# Reads ANTHROPIC_API_KEY from environment variables automatically.
-_client = anthropic.Anthropic()
+# Client is created on first use (not at import time) so that the .env file
+# has already been loaded before we try to read ANTHROPIC_API_KEY.
+_client = None
+
+
+def _get_client() -> anthropic.Anthropic:
+    global _client
+    if _client is None:
+        _client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
+    return _client
 
 
 def generate_pitch(
@@ -84,15 +92,16 @@ TASK:
 Write a short, genuine, personalised pitch email from moodmixformat to {contact['name']}.
 
 Requirements:
-- Subject line: catchy but not clickbait, mentions the release title
-- Body: 100-180 words maximum
-- Open by showing you know who they are and what they cover
-- One sentence explaining the release's vibe/mood
-- Include the Spotify link clearly
-- End with a friendly, low-pressure close
-- Sound like a real human artist, NOT a PR firm or automated system
-- Do NOT use phrases like "I hope this email finds you well" or "per my last email"
-- Do NOT sound desperate or overuse exclamation marks
+- Subject line: plain and direct, mentions the release title — no hype or clickbait
+- Body: 100-150 words maximum — keep it short
+- One brief line showing you know who they are (don't overdo it)
+- One or two sentences on the track's sound/vibe — reference the influences naturally, not as a sales pitch
+- Include the Spotify link
+- End simply — no "I would be honoured" or "it would mean the world" type language
+- Sound like a person sending an email, not a PR campaign
+- Do NOT use phrases like "I hope this email finds you well", "thrilled to share", "excited to announce", "I'd love for you to", or any hype language
+- Do NOT oversell — let the music speak, just give them enough context to decide if it's worth a listen
+- Do NOT use exclamation marks
 
 Return ONLY a JSON object in this exact format (no markdown, no extra text):
 {{
@@ -108,7 +117,7 @@ Return ONLY a JSON object in this exact format (no markdown, no extra text):
     )
 
     # Call Claude with adaptive thinking for thoughtful personalisation
-    response = _client.messages.create(
+    response = _get_client().messages.create(
         model="claude-opus-4-6",
         max_tokens=1024,
         thinking={"type": "adaptive"},

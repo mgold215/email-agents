@@ -44,12 +44,13 @@ Run both CREATE TABLE statements in your Supabase SQL Editor before first use.
 
 import os
 import logging
+from typing import Optional
 from supabase import create_client, Client
 
 logger = logging.getLogger(__name__)
 
 # Cache the client so we only create it once per run
-_client: Client | None = None
+_client: Optional[Client] = None
 
 
 def get_supabase() -> Client:

@@ -33,7 +33,7 @@ import time
 # Add parent dir to path so we can import our modules
 sys.path.insert(0, str(Path(__file__).parent))
 
-from spotify_checker import check_for_new_releases
+from spotify_checker import check_for_new_releases, release_from_url
 from contacts import get_email_contacts
 from pitch_generator import generate_pitches_for_release
 from email_sender import send_all_pitches
@@ -61,40 +61,51 @@ logger = logging.getLogger("spotify_outreach_agent")
 # Edit this to describe your sound. The more specific, the better the pitches.
 
 ARTIST_BIO = """
-moodmixformat is an independent electronic / lo-fi artist creating immersive,
-mood-driven soundscapes that blend chill beats, atmospheric textures, and
-emotive melodies. Inspired by artists like Boards of Canada, Tycho, and
-Four Tet, moodmixformat makes music for late-night drives, focused work
-sessions, and those in-between moments where you want to feel something
-without overthinking it. Based online, releasing independently with a focus
-on waterfall singles and EPs that build a continuous sonic world.
+moodmixformat is an independent tech house and melodic techno artist.
+The sound sits somewhere between the groove-led tension of Liquid Lab (Kream),
+the textured atmosphere of Drove, and the cinematic energy of DeVault —
+driving but melodic, functional but with depth. Releases are independent,
+focused on quality over quantity, with each track built as a complete idea
+rather than a formula.
 """
 
 # ---------------------------------------------------------------------------
 # Core agent logic
 # ---------------------------------------------------------------------------
 
-def run_outreach_agent() -> None:
+def run_outreach_agent(manual_spotify_url: str = None, manual_release_name: str = None) -> None:
     """
-    The main agent function — called every Friday.
+    The main agent function — called every Friday (or manually via --run-now).
 
     Steps:
-      1. Check Spotify for new releases
+      1. Get new releases — either from Spotify API, or from a URL you provide
       2. For each new release, pitch all contacts
       3. Log results
+
+    Args:
+      manual_spotify_url:   If provided, skips the Spotify API check and uses this URL directly.
+      manual_release_name:  The name of the release (required when manual_spotify_url is set).
     """
     logger.info("=" * 60)
     logger.info("moodmixformat Spotify Outreach Agent starting...")
     logger.info("Run time: %s", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
     logger.info("=" * 60)
 
-    # Step 1: Check Spotify for new releases
-    try:
-        new_releases = check_for_new_releases()
-    except Exception as e:
-        logger.error("Failed to check Spotify for releases: %s", e)
-        logger.error("Make sure SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET are set.")
-        return
+    # Step 1: Get new releases
+    if manual_spotify_url:
+        # Manual mode: use the URL the user provided instead of checking the API
+        logger.info("Manual mode: using provided Spotify URL instead of API check.")
+        new_releases = [release_from_url(manual_spotify_url, manual_release_name)]
+        logger.info("Release: '%s' — %s", new_releases[0]["name"], new_releases[0]["spotify_url"])
+    else:
+        # Auto mode: check Spotify API for new releases this week
+        try:
+            new_releases = check_for_new_releases()
+        except Exception as e:
+            logger.error("Failed to check Spotify for releases: %s", e)
+            logger.error("Make sure SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET are set.")
+            logger.error("Or use --spotify-url to provide a link directly.")
+            return
 
     if not new_releases:
         logger.info("No new releases found this week. Nothing to pitch. See you next Friday!")
@@ -176,8 +187,6 @@ def _check_required_env_vars() -> bool:
     """
     required = {
         "ANTHROPIC_API_KEY": "Claude API key (get from console.anthropic.com)",
-        "SPOTIFY_CLIENT_ID": "Spotify app client ID (create at developer.spotify.com)",
-        "SPOTIFY_CLIENT_SECRET": "Spotify app client secret",
         "SENDER_EMAIL": "Your Gmail address for sending outreach emails",
         "SENDER_APP_PASSWORD": "Your Gmail App Password (not your regular password)",
     }
@@ -225,7 +234,25 @@ if __name__ == "__main__":
         action="store_true",
         help="Override: force dry run mode even if OUTREACH_LIVE_MODE=true",
     )
+    parser.add_argument(
+        "--spotify-url",
+        type=str,
+        default=None,
+        help="Provide a Spotify track/album URL directly instead of checking the API",
+    )
+    parser.add_argument(
+        "--release-name",
+        type=str,
+        default=None,
+        help="Name of the release (required when using --spotify-url)",
+    )
     args = parser.parse_args()
+
+    # Validate: if a URL is provided, a release name must also be given
+    if args.spotify_url and not args.release_name:
+        logger.error("--release-name is required when using --spotify-url.")
+        logger.error("Example: python agent.py --run-now --spotify-url '...' --release-name 'Song Title'")
+        sys.exit(1)
 
     # Force dry run if requested via CLI flag
     if args.dry_run_only:
@@ -237,8 +264,11 @@ if __name__ == "__main__":
         sys.exit(1)
 
     if args.run_now:
-        # Run immediately
-        run_outreach_agent()
+        # Run immediately, with optional manual URL override
+        run_outreach_agent(
+            manual_spotify_url=args.spotify_url,
+            manual_release_name=args.release_name,
+        )
     else:
         # Run on schedule (every Friday)
         run_scheduler()

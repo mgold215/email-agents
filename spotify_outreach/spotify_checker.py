@@ -180,3 +180,37 @@ def get_release_details(release_id: str) -> dict:
     sp = _get_spotify_client()
     album = sp.album(release_id)
     return album
+
+
+def release_from_url(spotify_url: str, release_name: str, release_type: str = "single", release_date: str = None) -> dict:
+    """
+    Build a release dict directly from a Spotify URL — no API key needed.
+    Use this when you want to provide a song link manually instead of
+    letting the agent auto-detect new releases from the discography.
+
+    Args:
+      spotify_url:   The full Spotify link, e.g. https://open.spotify.com/track/abc123
+      release_name:  The name of the song or album, e.g. "Drift"
+      release_type:  'single', 'album', or 'ep' (default: 'single')
+      release_date:  Date string e.g. '2026-03-20' (default: today)
+    """
+    from datetime import date as _date
+
+    # Extract the ID from the URL (the part after /track/ or /album/)
+    # e.g. https://open.spotify.com/track/3NMZENmh8Ji1Qb1XjFNaH7 → 3NMZENmh8Ji1Qb1XjFNaH7
+    parts = spotify_url.rstrip("/").split("/")
+    release_id = parts[-1].split("?")[0]  # strip any ?si=... query params
+
+    if not release_date:
+        release_date = str(_date.today())
+
+    return {
+        "id":           release_id,
+        "name":         release_name,
+        "type":         release_type,
+        "release_date": release_date,
+        "spotify_url":  spotify_url,
+        "spotify_uri":  f"spotify:track:{release_id}",
+        "total_tracks": 1,
+        "images":       [],
+    }
