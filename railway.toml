@@ -2,5 +2,5 @@
 builder = "nixpacks"
 
 [deploy]
-startCommand = "pip install -r spotify_outreach/requirements.txt -q && python spotify_outreach/agent.py"
+startCommand = "python agent.py"
 restartPolicyType = "never"
