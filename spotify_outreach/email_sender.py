@@ -16,17 +16,15 @@ Key safety features:
   4. Deduplication — checks Supabase to see if this contact was already emailed
      about this release, so you never double-send.
 
-Email is sent via Gmail SMTP using an App Password.
-(You must enable 2FA on your Google account and create an App Password.)
+Email is sent via the Brevo API (HTTPS) — works on all cloud platforms
+including Railway, which blocks outbound SMTP ports.
 """
 
 import logging
 import os
-import smtplib
 import time
+import requests
 from datetime import datetime, timezone
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
 
 from supabase_client import get_supabase
 
@@ -36,15 +34,18 @@ logger = logging.getLogger(__name__)
 # Config — read from environment variables
 # ---------------------------------------------------------------------------
 
-# Your Gmail address (the one you're sending FROM)
+# Your email address (the one you're sending FROM)
 SENDER_EMAIL = os.environ.get("SENDER_EMAIL", "")
-
-# Gmail App Password (NOT your regular Gmail password)
-# Generate at: myaccount.google.com/apppasswords
-SENDER_APP_PASSWORD = os.environ.get("SENDER_APP_PASSWORD", "")
 
 # Your name as it appears in the "From" field
 SENDER_NAME = os.environ.get("SENDER_NAME", "moodmixformat")
+
+# Brevo API key — get a free one at app.brevo.com → Settings → API Keys
+# Add this as BREVO_API_KEY in Railway variables
+BREVO_API_KEY = os.environ.get("BREVO_API_KEY", "")
+
+# Brevo API endpoint for sending transactional emails
+BREVO_API_URL = "https://api.brevo.com/v3/smtp/email"
 
 # When False (default): emails are printed to console but NOT sent.
 # Set OUTREACH_LIVE_MODE=true in .env ONLY when you're ready for real sends.
@@ -106,24 +107,6 @@ def already_contacted(release_id: str, contact_email: str) -> bool:
 # Email sending
 # ---------------------------------------------------------------------------
 
-def _build_email_message(
-    to_email: str,
-    to_name: str,
-    subject: str,
-    body: str,
-) -> MIMEMultipart:
-    """
-    Build the MIME email message object.
-    Sends as plain text (no HTML) — simpler and less likely to hit spam.
-    """
-    msg = MIMEMultipart()
-    msg["From"] = f"{SENDER_NAME} <{SENDER_EMAIL}>"
-    msg["To"] = f"{to_name} <{to_email}>"
-    msg["Subject"] = subject
-    msg.attach(MIMEText(body, "plain"))
-    return msg
-
-
 def send_pitch(
     contact: dict,
     release: dict,
@@ -180,39 +163,46 @@ def send_pitch(
         # NOTE: We do NOT mark as 'sent' in dry run, so live mode will still send later.
         return True
 
-    # --- Live mode: actually send the email ---
+    # --- Live mode: send via Brevo API (HTTPS, works on Railway) ---
     try:
-        msg = _build_email_message(contact_email, contact_name, subject, body)
-
-        # Connect to Gmail SMTP over SSL (port 465)
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-            server.login(SENDER_EMAIL, SENDER_APP_PASSWORD)
-            server.send_message(msg)
-
-        # Log as 'sent' in Supabase — this also acts as the dedup marker
-        _write_audit_entry({
-            "action":     "sent",
-            "contact":    contact_name,
-            "email":      contact_email,
-            "release":    release["name"],
-            "release_id": release_id,
-            "subject":    subject,
-        })
-        logger.info("Email sent to %s <%s>", contact_name, contact_email)
-        return True
-
-    except smtplib.SMTPAuthenticationError:
-        logger.error(
-            "Gmail authentication failed. Check SENDER_EMAIL and SENDER_APP_PASSWORD."
+        response = requests.post(
+            BREVO_API_URL,
+            headers={
+                "api-key": BREVO_API_KEY,
+                "Content-Type": "application/json",
+            },
+            json={
+                "sender":      {"name": SENDER_NAME, "email": SENDER_EMAIL},
+                "to":          [{"name": contact_name, "email": contact_email}],
+                "subject":     subject,
+                "textContent": body,
+            },
+            timeout=30,
         )
-        _write_audit_entry({
-            "action":     "error_auth",
-            "contact":    contact_name,
-            "email":      contact_email,
-            "release":    release["name"],
-            "release_id": release_id,
-        })
-        return False
+
+        if response.status_code in (200, 201):
+            _write_audit_entry({
+                "action":     "sent",
+                "contact":    contact_name,
+                "email":      contact_email,
+                "release":    release["name"],
+                "release_id": release_id,
+                "subject":    subject,
+            })
+            logger.info("Email sent to %s <%s>", contact_name, contact_email)
+            return True
+        else:
+            error_msg = f"Brevo API error {response.status_code}: {response.text}"
+            logger.error("Failed to send email to %s: %s", contact_name, error_msg)
+            _write_audit_entry({
+                "action":     "error_send",
+                "contact":    contact_name,
+                "email":      contact_email,
+                "release":    release["name"],
+                "release_id": release_id,
+                "error":      error_msg,
+            })
+            return False
 
     except Exception as e:
         logger.error("Failed to send email to %s: %s", contact_name, e)
