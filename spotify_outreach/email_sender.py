@@ -184,9 +184,8 @@ def send_pitch(
     try:
         msg = _build_email_message(contact_email, contact_name, subject, body)
 
-        # Connect to Gmail SMTP over TLS (port 587)
-        with smtplib.SMTP("smtp.gmail.com", 587) as server:
-            server.starttls()
+        # Connect to Gmail SMTP over SSL (port 465)
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
             server.login(SENDER_EMAIL, SENDER_APP_PASSWORD)
             server.send_message(msg)
 
