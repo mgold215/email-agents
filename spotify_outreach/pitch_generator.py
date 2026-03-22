@@ -79,7 +79,7 @@ NEW RELEASE:
 - Title: {release['name']}
 - Type: {release_type_label}
 - Released: {release.get('release_date', 'recently')}
-- Spotify link: {release['spotify_url']}
+- Link: {release['spotify_url']}
 - Number of tracks: {release.get('total_tracks', 1)}
 
 CONTACT TO PITCH:
@@ -96,7 +96,7 @@ Requirements:
 - Body: 100-150 words maximum — keep it short
 - One brief line showing you know who they are (don't overdo it)
 - One or two sentences on the track's sound/vibe — reference the influences naturally, not as a sales pitch
-- Include the Spotify link
+- Include the link
 - End simply — no "I would be honoured" or "it would mean the world" type language
 - Sound like a person sending an email, not a PR campaign
 - Do NOT use phrases like "I hope this email finds you well", "thrilled to share", "excited to announce", "I'd love for you to", or any hype language
