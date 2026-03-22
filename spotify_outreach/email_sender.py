@@ -48,7 +48,7 @@ SENDER_NAME = os.environ.get("SENDER_NAME", "moodmixformat")
 
 # When False (default): emails are printed to console but NOT sent.
 # Set OUTREACH_LIVE_MODE=true in .env ONLY when you're ready for real sends.
-LIVE_MODE = os.environ.get("OUTREACH_LIVE_MODE", "false").lower() == "true"
+# NOTE: This is read at runtime (not import time) so .env loading works correctly.
 
 # Seconds to wait between each email to avoid spam filters
 RATE_LIMIT_SECONDS = int(os.environ.get("EMAIL_RATE_LIMIT_SECONDS", "30"))
@@ -157,6 +157,9 @@ def send_pitch(
         })
         return False
 
+    # Read live mode at runtime so .env is already loaded by this point
+    LIVE_MODE = os.environ.get("OUTREACH_LIVE_MODE", "false").lower() == "true"
+
     # --- Dry run: print to console instead of sending ---
     if not LIVE_MODE:
         print("\n" + "=" * 70)
@@ -239,6 +242,9 @@ def send_all_pitches(pitched_contacts: list[dict], release: dict) -> dict:
     """
     summary = {"sent": 0, "skipped": 0, "errors": 0}
     total = len(pitched_contacts)
+
+    # Read live mode at runtime so .env is already loaded by this point
+    LIVE_MODE = os.environ.get("OUTREACH_LIVE_MODE", "false").lower() == "true"
 
     mode_label = "LIVE" if LIVE_MODE else "DRY RUN"
     logger.info(
