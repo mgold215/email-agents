@@ -26,7 +26,7 @@ import time
 import requests
 from datetime import datetime, timezone
 
-from supabase_client import get_supabase
+from supabase_client import get_supabase, sanitize_text
 
 logger = logging.getLogger(__name__)
 
@@ -67,18 +67,29 @@ def _write_audit_entry(entry: dict) -> None:
     entry keys: action, contact_name, contact_email, release_name,
                 release_id, subject (optional), error_message (optional)
     """
-    supabase = get_supabase()
-    row = {
-        "timestamp":     datetime.now(timezone.utc).isoformat(),
-        "action":        entry.get("action"),
-        "contact_name":  entry.get("contact"),
-        "contact_email": entry.get("email"),
-        "release_name":  entry.get("release"),
-        "release_id":    entry.get("release_id"),
-        "subject":       entry.get("subject"),
-        "error_message": entry.get("error"),
-    }
-    supabase.table("outreach_log").insert(row).execute()
+    # Allowed actions — reject anything unexpected
+    VALID_ACTIONS = {"sent", "dry_run", "skipped_duplicate", "error_send"}
+    action = entry.get("action", "")
+    if action not in VALID_ACTIONS:
+        logger.warning("Rejected invalid audit action: %s", action)
+        return
+
+    try:
+        supabase = get_supabase()
+        row = {
+            "timestamp":     datetime.now(timezone.utc).isoformat(),
+            "action":        action,
+            "contact_name":  sanitize_text(entry.get("contact", ""), 200),
+            "contact_email": sanitize_text(entry.get("email", ""), 320),
+            "release_name":  sanitize_text(entry.get("release", ""), 500),
+            "release_id":    sanitize_text(entry.get("release_id", ""), 100),
+            "subject":       sanitize_text(entry.get("subject", ""), 500),
+            "error_message": sanitize_text(entry.get("error", ""), 1000),
+        }
+        supabase.table("outreach_log").insert(row).execute()
+    except Exception as e:
+        # Audit logging should never crash the main workflow
+        logger.error("Failed to write audit entry to Supabase: %s", e)
 
 
 # ---------------------------------------------------------------------------
@@ -90,17 +101,23 @@ def already_contacted(release_id: str, contact_email: str) -> bool:
     Return True if we've already sent (or logged a 'sent') email to this
     contact about this release. Checks the Supabase outreach_log table.
     """
-    supabase = get_supabase()
-    response = (
-        supabase.table("outreach_log")
-        .select("id")
-        .eq("release_id", release_id)
-        .eq("contact_email", contact_email)
-        .eq("action", "sent")
-        .limit(1)
-        .execute()
-    )
-    return len(response.data) > 0
+    try:
+        supabase = get_supabase()
+        response = (
+            supabase.table("outreach_log")
+            .select("id")
+            .eq("release_id", sanitize_text(release_id, 100))
+            .eq("contact_email", sanitize_text(contact_email, 320))
+            .eq("action", "sent")
+            .limit(1)
+            .execute()
+        )
+        return len(response.data) > 0
+    except Exception as e:
+        # If the dedup check fails, err on the side of NOT sending
+        # (safer than accidentally double-emailing someone)
+        logger.error("Dedup check failed, treating as already contacted: %s", e)
+        return True
 
 
 # ---------------------------------------------------------------------------
