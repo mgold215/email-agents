@@ -5,41 +5,16 @@ Creates and returns a shared Supabase client used across the agent.
 
 Reads credentials from environment variables (set in your .env file):
   - SUPABASE_URL: your project URL (e.g. https://abc123.supabase.co)
-  - SUPABASE_KEY: your project's anon/public key
+  - SUPABASE_SERVICE_ROLE_KEY: your project's service_role (secret) key
 
-You'll need two tables in your Supabase project:
+IMPORTANT — we use the service_role key (NOT the anon/public key) because
+this is a server-side automation script that runs in a trusted environment.
+The service_role key bypasses Row Level Security, which is what we want for
+our own backend.  Meanwhile, RLS stays enabled on the tables so that if the
+anon key is ever exposed, no one can read or modify the data through it.
 
-  1. seen_releases
-     Tracks which Spotify releases have already been pitched so we
-     don't re-pitch the same release every week.
-
-     CREATE TABLE seen_releases (
-         release_id   TEXT PRIMARY KEY,
-         release_name TEXT,
-         release_type TEXT,
-         release_date TEXT,
-         spotify_url  TEXT,
-         created_at   TIMESTAMPTZ DEFAULT NOW()
-     );
-
-  2. outreach_log
-     Append-only audit trail of every email action (sent, skipped, error).
-     Also used to check deduplication (did we already email this person?).
-
-     CREATE TABLE outreach_log (
-         id            UUID DEFAULT gen_random_uuid() PRIMARY KEY,
-         timestamp     TIMESTAMPTZ,
-         action        TEXT,
-         contact_name  TEXT,
-         contact_email TEXT,
-         release_name  TEXT,
-         release_id    TEXT,
-         subject       TEXT,
-         error_message TEXT,
-         created_at    TIMESTAMPTZ DEFAULT NOW()
-     );
-
-Run both CREATE TABLE statements in your Supabase SQL Editor before first use.
+You'll need two tables in your Supabase project.  Run the SQL in
+supabase_setup.sql in the Supabase SQL Editor before first use.
 """
 
 import os
@@ -57,19 +32,34 @@ def get_supabase() -> Client:
     """
     Return the shared Supabase client.
     Creates it on first call, then reuses the same connection.
+    Uses the service_role key so the agent can bypass RLS server-side.
     """
     global _client
     if _client is None:
         url = os.environ.get("SUPABASE_URL", "")
-        key = os.environ.get("SUPABASE_KEY", "")
+        # Prefer the new service-role variable; fall back to the old
+        # SUPABASE_KEY for backwards compatibility during migration.
+        key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "") or os.environ.get("SUPABASE_KEY", "")
 
         if not url or not key:
             raise ValueError(
-                "SUPABASE_URL and SUPABASE_KEY must be set in your .env file. "
-                "Find them in your Supabase project under Settings → API."
+                "SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY must be set in "
+                "your .env file.  Find the service_role key in your Supabase "
+                "project under Settings → API → Project API Keys."
             )
 
         _client = create_client(url, key)
-        logger.info("Supabase client connected to %s", url)
+        # Log connection without exposing the full project URL
+        logger.info("Supabase client connected successfully")
 
     return _client
+
+
+def sanitize_text(value: str, max_length: int = 1000) -> str:
+    """
+    Basic input sanitization for text going into the database.
+    Strips leading/trailing whitespace and truncates to max_length.
+    """
+    if not isinstance(value, str):
+        return ""
+    return value.strip()[:max_length]

@@ -17,7 +17,7 @@ import logging
 import spotipy
 from spotipy.oauth2 import SpotifyClientCredentials
 
-from supabase_client import get_supabase
+from supabase_client import get_supabase, sanitize_text
 
 # --------------------------------------------------------------------------
 # Config
@@ -48,10 +48,14 @@ def _load_seen_releases() -> set:
     Reads from the Supabase 'seen_releases' table.
     Returns an empty set if nothing has been saved yet.
     """
-    supabase = get_supabase()
-    # Fetch just the release_id column from every row in the table
-    response = supabase.table("seen_releases").select("release_id").execute()
-    return {row["release_id"] for row in response.data}
+    try:
+        supabase = get_supabase()
+        # Fetch just the release_id column from every row in the table
+        response = supabase.table("seen_releases").select("release_id").execute()
+        return {row["release_id"] for row in response.data}
+    except Exception as e:
+        logger.error("Failed to load seen releases from Supabase: %s", e)
+        raise
 
 
 def _save_seen_releases(new_releases: list[dict]) -> None:
@@ -64,23 +68,27 @@ def _save_seen_releases(new_releases: list[dict]) -> None:
     if not new_releases:
         return
 
-    supabase = get_supabase()
+    try:
+        supabase = get_supabase()
 
-    # Build the rows to insert — one per new release
-    rows = [
-        {
-            "release_id":   release["id"],
-            "release_name": release["name"],
-            "release_type": release["type"],
-            "release_date": release["release_date"],
-            "spotify_url":  release["spotify_url"],
-        }
-        for release in new_releases
-    ]
+        # Build the rows to insert — one per new release, with sanitized inputs
+        rows = [
+            {
+                "release_id":   sanitize_text(release["id"], 100),
+                "release_name": sanitize_text(release["name"], 500),
+                "release_type": sanitize_text(release["type"], 50),
+                "release_date": sanitize_text(release["release_date"], 20),
+                "spotify_url":  sanitize_text(release["spotify_url"], 500),
+            }
+            for release in new_releases
+        ]
 
-    # upsert: insert new rows, and if release_id already exists just update it
-    supabase.table("seen_releases").upsert(rows).execute()
-    logger.info("Saved %d new release(s) to Supabase seen_releases table", len(rows))
+        # upsert: insert new rows, and if release_id already exists just update it
+        supabase.table("seen_releases").upsert(rows).execute()
+        logger.info("Saved %d new release(s) to Supabase seen_releases table", len(rows))
+    except Exception as e:
+        logger.error("Failed to save seen releases to Supabase: %s", e)
+        raise
 
 
 def _fetch_all_releases(sp: spotipy.Spotify) -> list[dict]:
