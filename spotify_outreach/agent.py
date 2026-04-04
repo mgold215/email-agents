@@ -133,7 +133,8 @@ def get_release_from_env() -> Optional[dict]:
 # Core agent logic
 # ---------------------------------------------------------------------------
 
-def run_outreach_agent(spotify_url: str = None, release_name: str = None) -> None:
+def run_outreach_agent(spotify_url: str = None, release_name: str = None,
+                       refresh_recipients: bool = False) -> None:
     """
     The main agent function.
 
@@ -143,8 +144,10 @@ def run_outreach_agent(spotify_url: str = None, release_name: str = None) -> Non
       3. Nothing to do — logs and exits cleanly
 
     Args:
-      spotify_url:   Spotify track/album URL (from --spotify-url flag)
-      release_name:  Release title (from --release-name flag)
+      spotify_url:         Spotify track/album URL (from --spotify-url flag)
+      release_name:        Release title (from --release-name flag)
+      refresh_recipients:  When True, bypasses deduplication so all contacts
+                           receive the email even if they were contacted before.
     """
     logger.info("=" * 60)
     logger.info("moodmixformat Outreach Agent starting...")
@@ -187,6 +190,7 @@ def run_outreach_agent(spotify_url: str = None, release_name: str = None) -> Non
     summary = send_all_pitches(
         pitched_contacts=pitched_contacts,
         release=release,
+        refresh_recipients=refresh_recipients,
     )
 
     logger.info(
@@ -283,6 +287,11 @@ if __name__ == "__main__":
         default=None,
         help="Release title — required when using --spotify-url",
     )
+    parser.add_argument(
+        "--refresh-recipients",
+        action="store_true",
+        help="Bypass deduplication and re-send to all contacts, even ones already contacted",
+    )
     args = parser.parse_args()
 
     # Validate: if a URL is provided, a name must also be given
@@ -302,10 +311,17 @@ if __name__ == "__main__":
     # the start command. Set RUN_NOW=true in Railway Variables to fire immediately.
     run_now = args.run_now or os.environ.get("RUN_NOW", "").lower() == "true"
 
+    # REFRESH_RECIPIENTS env var lets Railway bypass dedup without CLI flags.
+    refresh_recipients = (
+        args.refresh_recipients
+        or os.environ.get("REFRESH_RECIPIENTS", "").lower() == "true"
+    )
+
     if run_now:
         run_outreach_agent(
             spotify_url=args.spotify_url,
             release_name=args.release_name,
+            refresh_recipients=refresh_recipients,
         )
     else:
         run_scheduler()

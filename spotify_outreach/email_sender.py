@@ -40,6 +40,10 @@ SENDER_EMAIL = os.environ.get("SENDER_EMAIL", "")
 # Your name as it appears in the "From" field
 SENDER_NAME = os.environ.get("SENDER_NAME", "moodmixformat")
 
+# BCC email — you'll receive a blind copy of every outreach email.
+# Defaults to SENDER_EMAIL if not set separately. Set BCC_EMAIL in .env to use a different address.
+BCC_EMAIL = os.environ.get("BCC_EMAIL", "") or SENDER_EMAIL
+
 # Brevo API key — get a free one at app.brevo.com → Settings → API Keys
 # Add this as BREVO_API_KEY in Railway variables
 BREVO_API_KEY = os.environ.get("BREVO_API_KEY", "")
@@ -112,9 +116,14 @@ def send_pitch(
     release: dict,
     subject: str,
     body: str,
+    refresh_recipients: bool = False,
 ) -> bool:
     """
     Send (or simulate sending) a single pitch email.
+
+    Args:
+      refresh_recipients: When True, bypasses the deduplication check so the
+                          email is sent even if this contact was contacted before.
 
     Returns True if the email was sent (or simulated in dry-run mode),
     False if it was skipped (already contacted) or errored.
@@ -129,7 +138,8 @@ def send_pitch(
         return False
 
     # --- Skip if already contacted about this release (dedup check in Supabase) ---
-    if already_contacted(release_id, contact_email):
+    # Bypassed when refresh_recipients=True so you can re-send to all contacts.
+    if not refresh_recipients and already_contacted(release_id, contact_email):
         logger.info("Skipping %s — already contacted about '%s'", contact_name, release["name"])
         _write_audit_entry({
             "action":     "skipped_duplicate",
@@ -143,10 +153,15 @@ def send_pitch(
     # Read live mode at runtime so .env is already loaded by this point
     LIVE_MODE = os.environ.get("OUTREACH_LIVE_MODE", "false").lower() == "true"
 
+    # Read BCC at runtime so .env is already loaded
+    bcc_email = os.environ.get("BCC_EMAIL", "") or os.environ.get("SENDER_EMAIL", "")
+
     # --- Dry run: print to console instead of sending ---
     if not LIVE_MODE:
         print("\n" + "=" * 70)
         print(f"[DRY RUN] Would send email to: {contact_name} <{contact_email}>")
+        if bcc_email:
+            print(f"BCC: {bcc_email}")
         print(f"Subject: {subject}")
         print("-" * 70)
         print(body)
@@ -165,18 +180,23 @@ def send_pitch(
 
     # --- Live mode: send via Brevo API (HTTPS, works on Railway) ---
     try:
+        # Build the email payload; include BCC if an address is configured
+        email_payload = {
+            "sender":      {"name": SENDER_NAME, "email": SENDER_EMAIL},
+            "to":          [{"name": contact_name, "email": contact_email}],
+            "subject":     subject,
+            "textContent": body,
+        }
+        if bcc_email:
+            email_payload["bcc"] = [{"email": bcc_email}]
+
         response = requests.post(
             BREVO_API_URL,
             headers={
                 "api-key": BREVO_API_KEY,
                 "Content-Type": "application/json",
             },
-            json={
-                "sender":      {"name": SENDER_NAME, "email": SENDER_EMAIL},
-                "to":          [{"name": contact_name, "email": contact_email}],
-                "subject":     subject,
-                "textContent": body,
-            },
+            json=email_payload,
             timeout=30,
         )
 
@@ -217,14 +237,17 @@ def send_pitch(
         return False
 
 
-def send_all_pitches(pitched_contacts: list[dict], release: dict) -> dict:
+def send_all_pitches(pitched_contacts: list[dict], release: dict,
+                     refresh_recipients: bool = False) -> dict:
     """
     Send emails to all contacts in the list, with rate limiting between each.
 
     Args:
-        pitched_contacts: List of dicts from pitch_generator, each with
-                          'contact', 'subject', 'body' keys.
-        release:          The release dict from spotify_checker.
+        pitched_contacts:   List of dicts from pitch_generator, each with
+                            'contact', 'subject', 'body' keys.
+        release:            The release dict from spotify_checker.
+        refresh_recipients: When True, bypasses deduplication so all contacts
+                            are emailed even if they were contacted before.
 
     Returns:
         A summary dict: { "sent": int, "skipped": int, "errors": int }
@@ -237,8 +260,9 @@ def send_all_pitches(pitched_contacts: list[dict], release: dict) -> dict:
 
     mode_label = "LIVE" if LIVE_MODE else "DRY RUN"
     logger.info(
-        "Starting outreach for '%s' — %d contacts [%s MODE]",
-        release["name"], total, mode_label
+        "Starting outreach for '%s' — %d contacts [%s MODE]%s",
+        release["name"], total, mode_label,
+        " [REFRESH RECIPIENTS — dedup bypassed]" if refresh_recipients else "",
     )
 
     if not LIVE_MODE:
@@ -254,7 +278,8 @@ def send_all_pitches(pitched_contacts: list[dict], release: dict) -> dict:
 
         logger.info("Processing %d/%d: %s", i, total, contact["name"])
 
-        success = send_pitch(contact, release, subject, body)
+        success = send_pitch(contact, release, subject, body,
+                             refresh_recipients=refresh_recipients)
 
         if success:
             summary["sent"] += 1
