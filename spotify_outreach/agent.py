@@ -36,9 +36,84 @@ import time
 # Add parent dir to path so we can import our modules
 sys.path.insert(0, str(Path(__file__).parent))
 
-from contacts import get_email_contacts
+from supabase_client import get_supabase
 from pitch_generator import generate_pitches_for_release
 from email_sender import send_all_pitches
+
+# ---------------------------------------------------------------------------
+# Supabase-backed contact functions (replaces hardcoded contacts.py)
+# ---------------------------------------------------------------------------
+
+def get_active_contacts() -> list:
+    """Load active contacts from Supabase, respecting cooldown periods.
+
+    A contact is eligible if:
+      - active = True
+      - releases_since_last_pitch >= cooldown_releases (enough releases have passed)
+      - OR last_pitched_date is NULL (never been pitched)
+    """
+    client = get_supabase()
+
+    # Get all active contacts from the curators table
+    response = (
+        client.table('curators')
+        .select('*')
+        .eq('active', True)
+        .execute()
+    )
+
+    all_active = response.data
+
+    # Filter by cooldown — only include contacts who are ready for a new pitch
+    eligible = []
+    for c in all_active:
+        never_pitched = c.get('last_pitched_date') is None
+        cooldown_met = (c.get('releases_since_last_pitch', 0) >= c.get('cooldown_releases', 2))
+        if never_pitched or cooldown_met:
+            eligible.append(c)
+
+    return eligible
+
+
+def update_curator_after_pitch(email: str, release_name: str) -> None:
+    """Update curator metadata after a successful pitch.
+
+    Sets last_pitched_date to today, records the release name,
+    resets releases_since_last_pitch to 0, and increments total_pitches.
+    """
+    from datetime import date
+    client = get_supabase()
+
+    # Get current total_pitches so we can increment it
+    response = client.table('curators').select('total_pitches').eq('email', email).execute()
+    current_pitches = response.data[0]['total_pitches'] if response.data else 0
+
+    client.table('curators').update({
+        'last_pitched_date': str(date.today()),
+        'last_pitched_release': release_name,
+        'releases_since_last_pitch': 0,
+        'total_pitches': (current_pitches or 0) + 1,
+    }).eq('email', email).execute()
+
+
+def increment_cooldown_for_skipped(release_name: str, pitched_emails: set) -> None:
+    """For curators NOT pitched this release, increment their releases_since_last_pitch.
+
+    This way, after enough releases pass without being pitched,
+    a curator becomes eligible again based on their cooldown_releases setting.
+    """
+    client = get_supabase()
+
+    # Get all active curators
+    response = client.table('curators').select('email, releases_since_last_pitch').eq('active', True).execute()
+
+    for curator in response.data:
+        if curator['email'] not in pitched_emails:
+            new_count = (curator.get('releases_since_last_pitch') or 0) + 1
+            client.table('curators').update({
+                'releases_since_last_pitch': new_count,
+            }).eq('email', curator['email']).execute()
+
 
 # ---------------------------------------------------------------------------
 # Logging setup — logs to both console and a file
@@ -166,9 +241,9 @@ def run_outreach_agent(spotify_url: str = None, release_name: str = None) -> Non
 
     logger.info("Type: %s | Date: %s", release["type"], release["release_date"])
 
-    # Get contacts
-    contacts = get_email_contacts()
-    logger.info("Loaded %d email contacts to pitch", len(contacts))
+    # Get contacts from Supabase (filtered by active status and cooldown)
+    contacts = get_active_contacts()
+    logger.info("Loaded %d eligible contacts (cooldown-filtered) to pitch", len(contacts))
 
     # Generate personalised pitches
     logger.info("Generating personalised pitches...")
@@ -196,6 +271,21 @@ def run_outreach_agent(spotify_url: str = None, release_name: str = None) -> Non
         summary["skipped"],
         summary["errors"],
     )
+
+    # Update cooldown tracking in Supabase for curators who were pitched
+    pitched_emails = {item['contact']['email'] for item in pitched_contacts}
+    for item in pitched_contacts:
+        try:
+            update_curator_after_pitch(item['contact']['email'], release['name'])
+        except Exception as e:
+            logger.warning("Could not update curator %s: %s", item['contact']['email'], e)
+
+    # Increment cooldown counter for curators who were NOT pitched this time
+    try:
+        increment_cooldown_for_skipped(release['name'], pitched_emails)
+    except Exception as e:
+        logger.warning("Could not update skipped curators: %s", e)
+
     logger.info("All releases processed. Agent run complete.")
 
 
